@@ -2,10 +2,15 @@ import os
 import time
 import logging
 import sys
+import io
+import threading
 import urllib.request
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+import schedule
+from flask import Flask, send_file, render_template_string
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -15,10 +20,13 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 load_dotenv()
 
+log_buffer = io.StringIO()
+handler = logging.StreamHandler(log_buffer)
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[logging.StreamHandler(sys.stdout), handler],
 )
 log = logging.getLogger(__name__)
 
@@ -30,8 +38,13 @@ if not EMAIL or not PASSWORD:
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+PORT = int(os.getenv("PORT", 8080))
 
 BASE_URL = "https://www.naukri.com"
+SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
+last_screenshot = None
+last_status = {"success": False, "time": None, "screenshot": None}
 
 
 def init_driver():
@@ -149,13 +162,24 @@ def send_telegram(message):
         log.warning(f"Telegram send failed: {e}")
 
 
-def main():
-    log.info("Starting Naukri profile updater...")
+def run_update():
+    global last_screenshot, last_status
+    log.info("=" * 50)
+    log.info("Starting scheduled Naukri profile update...")
     start = time.time()
     driver = init_driver()
     try:
         login(driver)
         update_profile(driver)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ss_path = SCREENSHOTS_DIR / f"profile_{timestamp}.png"
+        driver.save_screenshot(str(ss_path))
+        last_screenshot = ss_path
+        last_status = {
+            "success": True,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "screenshot": ss_path.name,
+        }
         elapsed = time.time() - start
         msg = f"Naukri profile updated successfully ({elapsed:.0f}s)"
         log.info(msg)
@@ -165,10 +189,79 @@ def main():
         msg = f"Naukri update failed after {elapsed:.0f}s: {e}"
         log.error(msg)
         send_telegram(msg)
-        sys.exit(1)
     finally:
         driver.quit()
+        log.info("=" * 50)
+
+
+LAST_HTML = """<!DOCTYPE html>
+<html>
+<head><title>Naukri Auto Update Status</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: Arial; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+.card { background: #fff; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.status { font-size: 18px; font-weight: bold; }
+.success { color: #28a745; }
+.fail { color: #dc3545; }
+img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
+a { color: #007bff; }
+</style></head>
+<body>
+<h1>Naukri Auto Update</h1>
+<div class="card">
+  <p class="status {{'success' if last_status.success else 'fail'}}">
+    {{'SUCCESS' if last_status.success else 'NO UPDATE YET'}}
+  </p>
+  <p><strong>Last run:</strong> {{last_status.time or 'Never'}}</p>
+</div>
+{% if last_status.screenshot %}
+<div class="card">
+  <h3>Last Screenshot</h3>
+  <p><em>{{last_status.time}}</em></p>
+  <img src="/screenshot/{{last_status.screenshot}}" alt="Last profile screenshot">
+</div>
+{% endif %}
+<div class="card">
+  <a href="/log">View Full Log</a>
+</div>
+</body></html>"""
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return render_template_string(LAST_HTML, last_status=last_status)
+
+@app.route("/laststatus")
+def laststatus():
+    return render_template_string(LAST_HTML, last_status=last_status)
+
+@app.route("/log")
+def get_log():
+    log_content = log_buffer.getvalue()
+    return f"<pre style='font-size:13px;'>{log_content}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@app.route("/screenshot/<name>")
+def screenshot(name):
+    path = SCREENSHOTS_DIR / name
+    if path.exists():
+        return send_file(str(path), mimetype="image/png")
+    return "Not found", 404
+
+
+def start_scheduler():
+    schedule.every().day.at("08:00").do(run_update)
+    schedule.every().day.at("17:00").do(run_update)
+    log.info("Scheduler set: 08:00 and 17:00 daily")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
 
 
 if __name__ == "__main__":
-    main()
+    log.info("Starting Naukri updater web service...")
+    run_update()
+    t = threading.Thread(target=start_scheduler, daemon=True)
+    t.start()
+    app.run(host="0.0.0.0", port=PORT)
