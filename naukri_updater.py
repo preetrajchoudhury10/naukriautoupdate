@@ -223,7 +223,7 @@ a { color: #007bff; }
 </div>
 {% endif %}
 <div class="card">
-  <a href="/log">View Full Log</a>
+  <a href="/start">Run Update Now</a> &nbsp;|&nbsp; <a href="/log">View Full Log</a>
 </div>
 </body></html>"""
 
@@ -241,6 +241,12 @@ def laststatus():
 def get_log():
     log_content = log_buffer.getvalue()
     return f"<pre style='font-size:13px;'>{log_content}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@app.route("/start")
+def start_now():
+    t = threading.Thread(target=run_update, daemon=True)
+    t.start()
+    return "<p>Update started. Check <a href='/log'>/log</a> for progress.</p>"
 
 @app.route("/screenshot/<name>")
 def screenshot(name):
