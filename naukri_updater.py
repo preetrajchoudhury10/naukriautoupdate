@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import sys
+import ssl
 import urllib.request
 from pathlib import Path
 from datetime import datetime
@@ -22,14 +23,27 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-EMAIL = os.getenv("NAUKRI_EMAIL")
-PASSWORD = os.getenv("NAUKRI_PASSWORD")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not EMAIL or not PASSWORD:
-    log.error("NAUKRI_EMAIL and NAUKRI_PASSWORD must be set in .env file")
+accounts = []
+i = 1
+while True:
+    email = os.getenv(f"NAUKRI_EMAIL_{i}") or (os.getenv("NAUKRI_EMAIL") if i == 1 else None)
+    password = os.getenv(f"NAUKRI_PASSWORD_{i}") or (os.getenv("NAUKRI_PASSWORD") if i == 1 else None)
+    if not email or not password:
+        if i == 1:
+            log.error("No credentials found. Set NAUKRI_EMAIL_1/NAUKRI_PASSWORD_1 in .env")
+            sys.exit(1)
+        break
+    accounts.append((email.strip(), password.strip()))
+    log.info(f"Account {i}: {email[:3]}...{email.split('@')[0][-1]}@{email.split('@')[1]}")
+    i += 1
+
+if not accounts:
     sys.exit(1)
+
+log.info(f"Total accounts loaded: {len(accounts)}")
 
 BASE_DIR = Path(__file__).parent
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
@@ -51,42 +65,49 @@ RETRIES = 3
 def send_telegram(message, screenshot_path=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    try:
-        if screenshot_path and os.path.exists(screenshot_path):
-            boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-            filename = os.path.basename(screenshot_path)
-            with open(screenshot_path, "rb") as f:
-                file_bytes = f.read()
-            body = (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
-                f"{TELEGRAM_CHAT_ID}\r\n"
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="caption"\r\n\r\n'
-                f"{message}\r\n"
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="photo"; filename="{filename}"\r\n'
-                f"Content-Type: image/png\r\n\r\n"
-            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
-            req = urllib.request.Request(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            )
-        else:
-            data = json.dumps({
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "parse_mode": "HTML",
-            }).encode()
-            req = urllib.request.Request(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                data=data,
-                headers={"Content-Type": "application/json"},
-            )
-        urllib.request.urlopen(req, timeout=15)
-    except Exception as e:
-        log.warning(f"Telegram send failed: {e}")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    for attempt in range(3):
+        try:
+            if screenshot_path and os.path.exists(screenshot_path):
+                boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+                filename = os.path.basename(screenshot_path)
+                with open(screenshot_path, "rb") as f:
+                    file_bytes = f.read()
+                body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                    f"{TELEGRAM_CHAT_ID}\r\n"
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+                    f"{message}\r\n"
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="photo"; filename="{filename}"\r\n'
+                    f"Content-Type: image/png\r\n\r\n"
+                ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+                req = urllib.request.Request(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                    data=body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                )
+            else:
+                data = json.dumps({
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "parse_mode": "HTML",
+                }).encode()
+                req = urllib.request.Request(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                )
+            urllib.request.urlopen(req, timeout=30, context=ctx)
+            return
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(3)
+            log.warning(f"Telegram attempt {attempt+1} failed: {e}")
 
 
 def init_driver():
@@ -103,7 +124,7 @@ def init_driver():
     return driver
 
 
-def login(driver):
+def login(driver, email, password):
     log.info("Navigating to naukri.com...")
     driver.get(BASE_URL)
     time.sleep(3)
@@ -120,12 +141,12 @@ def login(driver):
         EC.element_to_be_clickable((By.XPATH, EMAIL_XPATH))
     )
     email_input.clear()
-    email_input.send_keys(EMAIL)
+    email_input.send_keys(email)
 
     log.info("Entering password...")
     password_input = driver.find_element(By.XPATH, PASSWORD_XPATH)
     password_input.clear()
-    password_input.send_keys(PASSWORD)
+    password_input.send_keys(password)
 
     login_btn = driver.find_element(By.XPATH, "//button[@type='submit']")
     login_btn.click()
@@ -177,42 +198,36 @@ def update_profile(driver):
     return True
 
 
-def run():
-    log.info("=" * 50)
-    log.info("Starting Naukri profile update...")
+def run_account(email, password, acct_num, total):
+    label = f"[{acct_num}/{total}] {email[:3]}...{email.split('@')[0][-1]}@{email.split('@')[1]}"
+    log.info(f"{label} - Starting")
     start = time.time()
     ss_path = None
     last_error = None
 
     for attempt in range(1, RETRIES + 1):
-        log.info(f"Attempt {attempt}/{RETRIES}")
         driver = None
         try:
             driver = init_driver()
-            login(driver)
+            login(driver, email, password)
             update_profile(driver)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ss_path = str(SCREENSHOTS_DIR / f"profile_{ts}.png")
+            ss_path = str(SCREENSHOTS_DIR / f"acct{acct_num}_{ts}.png")
             driver.save_screenshot(ss_path)
             driver.quit()
             driver = None
-            status = {"success": True, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                      "screenshot": Path(ss_path).name, "error": None}
             elapsed = time.time() - start
-            msg = f"<b>Naukri Profile Updated</b>\nTime: {elapsed:.0f}s\nDate: {status['time']}"
-            log.info(f"Naukri profile updated successfully ({elapsed:.0f}s)")
+            msg = f"<b>Naukri Updated - Account {acct_num}</b>\nEmail: {email}\nTime: {elapsed:.0f}s"
+            log.info(f"{label} - Success ({elapsed:.0f}s)")
             send_telegram(msg, ss_path)
-            STATUS_FILE.write_text(json.dumps(status, indent=2))
-            log.info("=" * 50)
-            return
+            return True
         except Exception as e:
             last_error = str(e)
-            log.error(f"Attempt {attempt} failed: {e}")
+            log.error(f"{label} - Attempt {attempt} failed: {e}")
             if driver:
                 try:
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    ss_path = str(SCREENSHOTS_DIR / f"debug_{ts}.png")
-                    driver.save_screenshot(ss_path)
+                    driver.save_screenshot(str(SCREENSHOTS_DIR / f"debug_acct{acct_num}_{ts}.png"))
                 except Exception:
                     pass
                 try:
@@ -220,17 +235,46 @@ def run():
                 except Exception:
                     pass
             if attempt < RETRIES:
-                wait = attempt * 10
-                log.info(f"Retrying in {wait}s...")
-                time.sleep(wait)
+                time.sleep(attempt * 10)
 
-    elapsed = time.time() - start
-    status = {"success": False, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-              "screenshot": Path(ss_path).name if ss_path and Path(ss_path).exists() else None,
-              "error": last_error}
-    msg = f"<b>Naukri Update Failed</b>\nError: {last_error[:300]}\nTime: {elapsed:.0f}s"
-    log.error(msg.replace("<b>", "").replace("</b>", ""))
+    msg = f"<b>Naukri Failed - Account {acct_num}</b>\nEmail: {email}\nError: {last_error[:200]}"
+    log.error(f"{label} - Failed: {last_error[:200]}")
     send_telegram(msg, ss_path if ss_path and Path(ss_path).exists() else None)
+    return False
+
+
+def run():
+    log.info("=" * 50)
+    log.info(f"Starting Naukri update for {len(accounts)} account(s)")
+    overall_start = time.time()
+    results = []
+
+    for idx, (email, password) in enumerate(accounts, 1):
+        log.info("-" * 40)
+        ok = run_account(email, password, idx, len(accounts))
+        results.append({"email": email, "success": ok})
+        if idx < len(accounts):
+            delay = 30
+            log.info(f"Waiting {delay}s before next account...")
+            time.sleep(delay)
+
+    overall = time.time() - overall_start
+    success_count = sum(1 for r in results if r["success"])
+    log.info("=" * 50)
+    log.info(f"Done: {success_count}/{len(accounts)} accounts updated ({overall:.0f}s total)")
+
+    summary_lines = [f"<b>Naukri Summary</b>\n{success_count}/{len(accounts)} successful"]
+    for r in results:
+        icon = "OK" if r["success"] else "FAIL"
+        summary_lines.append(f"{icon} {r['email']}")
+    send_telegram("\n".join(summary_lines))
+
+    status = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total": len(accounts),
+        "successful": success_count,
+        "results": results,
+    }
     STATUS_FILE.write_text(json.dumps(status, indent=2))
     log.info("=" * 50)
 
