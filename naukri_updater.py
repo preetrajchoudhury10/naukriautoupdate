@@ -77,25 +77,43 @@ def send_telegram(message, screenshot_path=None):
         log.warning(f"Telegram send failed: {e}")
 
 
+LOGIN_BTN = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
+EMAIL_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input"
+PASSWORD_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input"
+EDIT_BTN = "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img"
+EDIT_TEXTAREA = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea"
+SAVE_BTN = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
+
+
 def try_click_login(page):
     strategies = [
-        ("role link with Login", lambda: page.get_by_role("link", name=re.compile("login", re.IGNORECASE)).first),
-        ("role button with Login", lambda: page.get_by_role("button", name=re.compile("login", re.IGNORECASE)).first),
-        ("text Login", lambda: page.get_by_text(re.compile("login", re.IGNORECASE)).first),
-        ("a with href login", lambda: page.locator("a[href*='login' i]").first),
-        ("any with href login", lambda: page.locator("[href*='login' i]").first),
-        ("class contains login", lambda: page.locator("[class*='login' i]").first),
-        ("id contains login", lambda: page.locator("[id*='login' i]").first),
-        ("Sign In text", lambda: page.get_by_text(re.compile("sign.in", re.IGNORECASE)).first),
-        ("Log In text", lambda: page.get_by_text(re.compile("log.in", re.IGNORECASE)).first),
-        ("header link", lambda: page.locator("header a, nav a, div[class*='header'] a").first),
+        ("exact login btn", LOGIN_BTN),
+        ("role link with Login", None),
     ]
-    for name, fn in strategies:
+    for name, xpath in strategies:
+        try:
+            if xpath:
+                el = page.locator(f"xpath={xpath}").first
+                el.wait_for(state="visible", timeout=5000)
+                el.click()
+                log.info(f"Found login via: {name}")
+                return True
+        except Exception:
+            continue
+    for fn_name, fn in [
+        ("role link", lambda: page.get_by_role("link", name=re.compile("login", re.IGNORECASE)).first),
+        ("role button", lambda: page.get_by_role("button", name=re.compile("login", re.IGNORECASE)).first),
+        ("text", lambda: page.get_by_text(re.compile("login", re.IGNORECASE)).first),
+        ("href", lambda: page.locator("a[href*='login' i], [href*='login' i]").first),
+        ("class/id", lambda: page.locator("[class*='login' i], [id*='login' i]").first),
+        ("sign in", lambda: page.get_by_text(re.compile("sign.in", re.IGNORECASE)).first),
+        ("header link", lambda: page.locator("header a, nav a").first),
+    ]:
         try:
             el = fn()
             if el.is_visible(timeout=3000):
-                log.info(f"Found login via: {name}")
                 el.click()
+                log.info(f"Found login via: {fn_name}")
                 return True
         except Exception:
             continue
@@ -103,26 +121,29 @@ def try_click_login(page):
 
 
 def try_fill_login(page):
-    for inp_xpath in ["//input[@type='email']", "//input[@type='text']", "(//input[@type='text'])[1]"]:
+    for name, xpath in [("exact email", EMAIL_XPATH), ("type email", "//input[@type='email']"), ("first text", "(//input[@type='text'])[1]")]:
         try:
-            el = page.locator(inp_xpath).first
-            if el.is_visible(timeout=2000):
-                el.fill(EMAIL)
-                break
+            el = page.locator(f"xpath={xpath}").first
+            el.wait_for(state="visible", timeout=3000)
+            el.fill(EMAIL)
+            log.info(f"Email via: {name}")
+            break
         except Exception:
             continue
     else:
         return False
 
-    try:
-        pw = page.locator("//input[@type='password']").first
-        pw.fill(PASSWORD)
-    except Exception:
-        return False
+    for name, xpath in [("exact pw", PASSWORD_XPATH), ("type password", "//input[@type='password']")]:
+        try:
+            el = page.locator(f"xpath={xpath}").first
+            el.fill(PASSWORD)
+            log.info(f"Password via: {name}")
+            break
+        except Exception:
+            continue
 
     try:
-        btn = page.locator("button[type='submit'], input[type='submit']").first
-        btn.click()
+        page.locator("button[type='submit'], input[type='submit']").first.click(timeout=5000)
         return True
     except Exception:
         return False
@@ -195,31 +216,30 @@ def run_update():
             page.goto("https://www.naukri.com/mnjuser/profile", wait_until="domcontentloaded", timeout=30000)
             time.sleep(5)
 
-            for xpath in [
-                "//img[contains(@src, 'edit') or contains(@class, 'edit')]",
-                "//span[contains(@class, 'edit')]",
-                "//i[contains(@class, 'edit')]",
-                "//button[contains(text(), 'Edit')]",
-                "(//div[contains(@class, 'profile')]//img)[1]",
-            ]:
+            for name, xpath in [("exact edit", EDIT_BTN), ("img edit", "//img[contains(@src, 'edit')]"),
+                                ("span edit", "//span[contains(@class, 'edit')]"),
+                                ("button edit", "//button[contains(text(), 'Edit')]")]:
                 try:
-                    el = page.locator(xpath).first
-                    if el.is_visible(timeout=3000):
-                        el.click()
-                        log.info("Clicked edit button")
-                        break
+                    el = page.locator(f"xpath={xpath}").first
+                    el.wait_for(state="visible", timeout=3000)
+                    el.click()
+                    log.info(f"Clicked edit via: {name}")
+                    break
                 except Exception:
                     continue
+            else:
+                log.warning("Edit button not found, continuing anyway")
             time.sleep(2)
 
             textarea = None
-            for xpath in ["//textarea", "//div[@contenteditable='true']",
-                          "//*[contains(@id, 'summary') or contains(@class, 'summary')]"]:
+            for name, xpath in [("exact textarea", EDIT_TEXTAREA), ("any textarea", "//textarea"),
+                                ("contenteditable", "//div[@contenteditable='true']")]:
                 try:
-                    el = page.locator(xpath).first
-                    if el.is_visible(timeout=3000):
-                        textarea = el
-                        break
+                    el = page.locator(f"xpath={xpath}").first
+                    el.wait_for(state="visible", timeout=3000)
+                    textarea = el
+                    log.info(f"Found text field via: {name}")
+                    break
                 except Exception:
                     continue
 
@@ -233,17 +253,14 @@ def run_update():
                     log.info("Added trailing space")
                 time.sleep(1)
 
-            for xpath in [
-                "//button[contains(translate(text(),'SAVE','save'),'save')]",
-                "//button[@type='submit']",
-                "//button[contains(@id, 'save')]",
-            ]:
+            for name, xpath in [("exact save", SAVE_BTN), ("button save", "//button[contains(text(), 'Save')]"),
+                                ("submit", "//button[@type='submit']")]:
                 try:
-                    el = page.locator(xpath).first
-                    if el.is_visible(timeout=3000):
-                        el.click()
-                        log.info("Clicked save")
-                        break
+                    el = page.locator(f"xpath={xpath}").first
+                    el.wait_for(state="visible", timeout=3000)
+                    el.click()
+                    log.info(f"Clicked save via: {name}")
+                    break
                 except Exception:
                     continue
 
