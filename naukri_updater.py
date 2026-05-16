@@ -4,10 +4,15 @@ import json
 import logging
 import sys
 import ssl
+import re
+import threading
 import urllib.request
+import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+import schedule
+from flask import Flask, send_file, render_template_string
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -25,6 +30,7 @@ log = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+PORT = int(os.getenv("PORT", 8080))
 
 accounts = []
 i = 1
@@ -62,6 +68,14 @@ EDIT_TEXTAREA_XPATH = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/text
 SAVE_BTN_XPATH = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
 
 RETRIES = 3
+last_status = {"success": False, "time": None, "error": None}
+log_buffer = []
+
+
+def save_status(s):
+    global last_status
+    last_status = s
+    STATUS_FILE.write_text(json.dumps(s, indent=2))
 
 
 def send_telegram(message, screenshot_path=None):
@@ -120,8 +134,7 @@ def init_driver(profile_path=None):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     if profile_path:
-        profile_path = str(profile_path)
-        options.add_argument(f"--user-data-dir={profile_path}")
+        options.add_argument(f"--user-data-dir={str(profile_path)}")
         options.add_argument("--profile-directory=Default")
     driver = webdriver.Chrome(options=options)
     driver.execute_script(
@@ -134,74 +147,39 @@ def login(driver, email, password):
     log.info("Navigating to naukri.com...")
     driver.get(BASE_URL)
     time.sleep(3)
-
     log.info("Clicking login button...")
-    login_btn = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, LOGIN_BTN_XPATH))
-    )
-    login_btn.click()
+    WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, LOGIN_BTN_XPATH))).click()
     time.sleep(2)
-
     log.info("Entering email...")
-    email_input = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, EMAIL_XPATH))
-    )
-    email_input.clear()
-    email_input.send_keys(email)
-
+    el = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, EMAIL_XPATH)))
+    el.clear(); el.send_keys(email)
     log.info("Entering password...")
-    password_input = driver.find_element(By.XPATH, PASSWORD_XPATH)
-    password_input.clear()
-    password_input.send_keys(password)
-
-    login_btn = driver.find_element(By.XPATH, "//button[@type='submit']")
-    login_btn.click()
-    log.info("Login button clicked")
-
+    pw = driver.find_element(By.XPATH, PASSWORD_XPATH)
+    pw.clear(); pw.send_keys(password)
+    driver.find_element(By.XPATH, "//button[@type='submit']").click()
     time.sleep(5)
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]"))
-    )
+    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]")))
     log.info("Login successful")
-    return True
 
 
 def update_profile(driver):
     log.info("Navigating to profile page...")
     driver.get(PROFILE_URL)
     time.sleep(5)
-
     log.info("Clicking edit button...")
-    edit_btn = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, EDIT_BTN_XPATH))
-    )
-    edit_btn.click()
+    WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, EDIT_BTN_XPATH))).click()
     time.sleep(2)
-
-    log.info("Waiting for edit modal textarea...")
-    summary = WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.XPATH, EDIT_TEXTAREA_XPATH))
-    )
-
-    current_text = summary.get_attribute("value") or ""
-    if current_text.endswith(" "):
-        summary.clear()
-        summary.send_keys(current_text.rstrip())
-        log.info("Removed trailing space from summary")
+    log.info("Toggling summary whitespace...")
+    summary = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, EDIT_TEXTAREA_XPATH)))
+    current = summary.get_attribute("value") or ""
+    if current.endswith(" "):
+        summary.clear(); summary.send_keys(current.rstrip())
     else:
-        summary.clear()
-        summary.send_keys(current_text + " ")
-        log.info("Added trailing space to summary")
-
+        summary.clear(); summary.send_keys(current + " ")
     time.sleep(1)
-
-    log.info("Clicking save button...")
-    save_btn = driver.find_element(By.XPATH, SAVE_BTN_XPATH)
-    save_btn.click()
-
+    log.info("Saving...")
+    driver.find_element(By.XPATH, SAVE_BTN_XPATH).click()
     time.sleep(4)
-    log.info("Profile update completed successfully")
-    return True
 
 
 def try_profile_login(driver):
@@ -210,9 +188,7 @@ def try_profile_login(driver):
     if "login" in driver.current_url.lower():
         return False
     try:
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]"))
-        )
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]")))
         return True
     except Exception:
         return False
@@ -223,39 +199,29 @@ def run_account(email, password, acct_num, total):
     log.info(f"{label} - Starting")
     start = time.time()
     ss_path = None
-    last_error = None
     profile_dir = PROFILES_DIR / f"account_{acct_num}"
 
+    last_error = "Unknown"
     for attempt in range(1, RETRIES + 1):
         driver = None
         try:
             driver = init_driver(profile_dir)
-
             if try_profile_login(driver):
-                log.info(f"{label} - Already logged in via saved profile")
+                log.info(f"{label} - Already logged in")
             else:
-                log.info(f"{label} - Profile expired or new, logging in...")
-                if attempt > 1:
-                    fresh_dir = PROFILES_DIR / f"account_{acct_num}_fresh"
-                    driver.quit()
-                    driver = init_driver(fresh_dir)
-                    driver.get(BASE_URL)
-                    time.sleep(3)
+                log.info(f"{label} - Logging in...")
                 login(driver, email, password)
-
             update_profile(driver)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ss_path = str(SCREENSHOTS_DIR / f"acct{acct_num}_{ts}.png")
             driver.save_screenshot(ss_path)
             driver.quit()
-            driver = None
             elapsed = time.time() - start
             msg = f"<b>Naukri Updated - Account {acct_num}</b>\nEmail: {email}\nTime: {elapsed:.0f}s"
             log.info(f"{label} - Success ({elapsed:.0f}s)")
             send_telegram(msg, ss_path)
             return True
         except Exception as e:
-            last_error = str(e)
             log.error(f"{label} - Attempt {attempt} failed: {e}")
             if driver:
                 try:
@@ -263,22 +229,19 @@ def run_account(email, password, acct_num, total):
                     driver.save_screenshot(str(SCREENSHOTS_DIR / f"debug_acct{acct_num}_{ts}.png"))
                 except Exception:
                     pass
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+                try: driver.quit()
+                except Exception: pass
             if attempt < RETRIES:
                 time.sleep(attempt * 10)
 
     msg = f"<b>Naukri Failed - Account {acct_num}</b>\nEmail: {email}\nError: {last_error[:200]}"
-    log.error(f"{label} - Failed: {last_error[:200]}")
     send_telegram(msg, ss_path if ss_path and Path(ss_path).exists() else None)
     return False
 
 
-def run():
+def run_update():
     log.info("=" * 50)
-    log.info(f"Starting Naukri update for {len(accounts)} account(s)")
+    log.info(f"Updating {len(accounts)} account(s)")
     overall_start = time.time()
     results = []
 
@@ -287,30 +250,139 @@ def run():
         ok = run_account(email, password, idx, len(accounts))
         results.append({"email": email, "success": ok})
         if idx < len(accounts):
-            delay = 30
-            log.info(f"Waiting {delay}s before next account...")
-            time.sleep(delay)
+            time.sleep(30)
 
     overall = time.time() - overall_start
     success_count = sum(1 for r in results if r["success"])
-    log.info("=" * 50)
-    log.info(f"Done: {success_count}/{len(accounts)} accounts updated ({overall:.0f}s total)")
+    log.info(f"Done: {success_count}/{len(accounts)} ({overall:.0f}s total)")
 
-    summary_lines = [f"<b>Naukri Summary</b>\n{success_count}/{len(accounts)} successful"]
+    summary = f"<b>Naukri Summary</b>\n{success_count}/{len(accounts)} successful"
     for r in results:
-        icon = "OK" if r["success"] else "FAIL"
-        summary_lines.append(f"{icon} {r['email']}")
-    send_telegram("\n".join(summary_lines))
+        summary += f"\n{'OK' if r['success'] else 'FAIL'} {r['email']}"
+    send_telegram(summary)
 
-    status = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total": len(accounts),
-        "successful": success_count,
-        "results": results,
-    }
-    STATUS_FILE.write_text(json.dumps(status, indent=2))
+    s = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "total": len(accounts),
+         "successful": success_count, "results": results}
+    save_status(s)
     log.info("=" * 50)
+
+
+def telegram_bot_loop():
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    log.info("Telegram bot listening for commands...")
+    offset = 0
+    api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    while True:
+        try:
+            params = urllib.parse.urlencode({"offset": offset, "timeout": 30})
+            req = urllib.request.Request(f"{api}/getUpdates?{params}")
+            with urllib.request.urlopen(req, timeout=35, context=ctx) as resp:
+                data = json.loads(resp.read())
+
+            for update in data.get("result", []):
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                text = (msg.get("text", "") or "").strip().lower()
+
+                if chat_id != str(TELEGRAM_CHAT_ID):
+                    continue
+
+                if text == "/manualrun":
+                    log.info("Manual run via Telegram")
+                    send_telegram("Manual run started...")
+                    threading.Thread(target=run_update, daemon=True).start()
+
+                elif text == "/status":
+                    s = last_status
+                    lines = [f"Last run: {s.get('time', 'Never')}"]
+                    if s.get("error"):
+                        lines.append(f"Error: {s['error'][:200]}")
+                    if s.get("results"):
+                        for r in s["results"]:
+                            lines.append(f"{'OK' if r['success'] else 'FAIL'} {r['email']}")
+                    send_telegram("\n".join(lines))
+
+                elif text in ("/start", "/help"):
+                    send_telegram(
+                        "Naukri Auto Updater\n"
+                        "/manualrun - run update now\n"
+                        "/status - last run result"
+                    )
+
+        except Exception as e:
+            if "timed out" not in str(e).lower():
+                log.warning(f"Bot error: {e}")
+        time.sleep(3)
+
+
+LAST_HTML = """<!DOCTYPE html>
+<html><head><title>Naukri Auto Update</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:Arial;max-width:800px;margin:40px auto;padding:0 20px;background:#f5f5f5}
+.card{background:#fff;border-radius:8px;padding:20px;margin:20px 0;box-shadow:0 2px 4px rgba(0,0,0,0.1)}
+.ok{color:#28a745;font-weight:bold;font-size:18px}
+.fail{color:#dc3545;font-weight:bold;font-size:18px}
+pre{background:#1e1e1e;color:#d4d4d4;padding:15px;border-radius:4px;overflow-x:auto;font-size:13px}
+.error{color:#dc3545}
+a{color:#007bff}
+</style></head><body>
+<h1>Naukri Auto Update</h1>
+<div class="card">
+  <p class="{{'ok' if s.get('successful',0)>0 else 'fail'}}">
+    {{s.get('successful',0)}}/{{s.get('total',0)}} OK
+  </p>
+  <p><strong>Last run:</strong> {{s.get('time','Never')}}</p>
+  {% if s.get('results') %}
+  <ul>{% for r in s['results'] %}
+    <li class="{{'ok' if r.success else 'fail'}}">{{'OK' if r.success else 'FAIL'}} {{r.email}}</li>
+  {% endfor %}</ul>
+  {% endif %}
+</div>
+<div class="card">
+  <a href="/start">Run Update Now</a>
+</div></body></html>"""
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+    s = last_status
+    return render_template_string(LAST_HTML, s=s)
+
+
+@app.route("/laststatus")
+def laststatus():
+    return json.dumps(last_status, indent=2), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/start")
+def start_now():
+    threading.Thread(target=run_update, daemon=True).start()
+    return "Update started", 202
 
 
 if __name__ == "__main__":
-    run()
+    log.info("Starting Naukri updater service...")
+    log.info(f"Accounts: {len(accounts)}")
+    log.info(f"Flask UI: http://127.0.0.1:{PORT}")
+    log.info("Telegram: /manualrun, /status, /help")
+
+    threading.Thread(target=run_update, daemon=True).start()
+    def scheduler_loop():
+        schedule.every().day.at("08:00").do(lambda: threading.Thread(target=run_update, daemon=True).start())
+        schedule.every().day.at("17:00").do(lambda: threading.Thread(target=run_update, daemon=True).start())
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
+    threading.Thread(target=scheduler_loop, daemon=True).start()
+    threading.Thread(target=telegram_bot_loop, daemon=True).start()
+
+    app.run(host="127.0.0.1", port=PORT)
