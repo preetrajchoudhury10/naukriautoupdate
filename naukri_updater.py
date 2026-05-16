@@ -4,6 +4,7 @@ import logging
 import sys
 import io
 import json
+import re
 import threading
 import urllib.request
 from datetime import datetime
@@ -42,57 +43,11 @@ last_screenshot = None
 last_status = {"success": False, "time": None, "screenshot": None, "error": None}
 
 
-SELECTORS = {
-    "login_btn": [
-        "//a[contains(text(), 'Login')]",
-        "//*[contains(text(), 'Login')]",
-        "//a[contains(@href, 'login')]",
-        "/html/body/div[1]/div[4]/div[2]/div/a[1]",
-    ],
-    "email": [
-        "//input[@type='text']",
-        "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input",
-    ],
-    "password": [
-        "//input[@type='password']",
-        "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input",
-    ],
-    "edit_btn": [
-        "//span[@class='editIcon']",
-        "//i[contains(@class, 'edit')]",
-        "//img[contains(@src, 'edit')]",
-        "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img",
-    ],
-    "textarea": [
-        "//textarea",
-        "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea",
-    ],
-    "save_btn": [
-        "//button[contains(text(), 'Save')]",
-        "//button[@type='submit']",
-        "/html/body/div[4]/div/div/div[2]/form/div[2]/button",
-    ],
-}
-
-
-def first_visible(page, selectors, timeout=10000):
-    for sel in selectors:
-        try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=timeout):
-                return loc
-        except Exception:
-            continue
-    raise TimeoutError(f"None of the selectors matched: {selectors}")
-
-
 def send_telegram(message, screenshot_path=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         if screenshot_path and os.path.exists(screenshot_path):
-            import http.client
-            import mimetypes
             boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
             filename = os.path.basename(screenshot_path)
             with open(screenshot_path, "rb") as f:
@@ -129,6 +84,93 @@ def send_telegram(message, screenshot_path=None):
         log.warning(f"Telegram send failed: {e}")
 
 
+def try_click_login(page):
+    strategies = [
+        ("role link with Login", lambda: page.get_by_role("link", name=re.compile("login", re.IGNORECASE)).first),
+        ("role button with Login", lambda: page.get_by_role("button", name=re.compile("login", re.IGNORECASE)).first),
+        ("text Login", lambda: page.get_by_text(re.compile("login", re.IGNORECASE)).first),
+        ("any element with text Login", lambda: page.locator("//*[contains(translate(text(),'LOGIN','login'),'login')]").first),
+        ("a with href login", lambda: page.locator("a[href*='login' i]").first),
+        ("any with href login", lambda: page.locator("[href*='login' i]").first),
+        ("class contains login", lambda: page.locator("[class*='login' i]").first),
+        ("id contains login", lambda: page.locator("[id*='login' i]").first),
+        ("data-* contains login", lambda: page.locator("[data-*='login' i]").first),
+        ("Sign In text", lambda: page.get_by_text(re.compile("sign.in", re.IGNORECASE)).first),
+        ("Log In text", lambda: page.get_by_text(re.compile("log.in", re.IGNORECASE)).first),
+        ("header link 1", lambda: page.locator("header a").first),
+        ("any a in top section", lambda: page.locator("div[class*='header'] a, nav a, div[class*='top'] a").first),
+    ]
+    for name, fn in strategies:
+        try:
+            el = fn()
+            if el.is_visible(timeout=3000):
+                log.info(f"Found login element via: {name}")
+                el.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def try_fill_login_form(page):
+    strategies = [
+        ("input type email", "//input[@type='email']"),
+        ("input type text", "//input[@type='text']"),
+        ("input placeholder email", "//input[contains(translate(@placeholder,'EMAIL','email'),'email')]"),
+        ("input placeholder username", "//input[contains(translate(@placeholder,'USERNAME','username'),'username')]"),
+        ("input name username", "//input[contains(@name, 'username')]"),
+        ("input name email", "//input[contains(@name, 'email')]"),
+        ("input id email", "//input[contains(@id, 'email')]"),
+        ("first text input", "(//input[@type='text'])[1]"),
+    ]
+    email_el = None
+    for name, xpath in strategies:
+        try:
+            el = page.locator(xpath).first
+            if el.is_visible(timeout=2000):
+                log.info(f"Found email field via: {name}")
+                el.fill(EMAIL)
+                email_el = el
+                break
+        except Exception:
+            continue
+    if not email_el:
+        return False
+
+    pw_strategies = [
+        ("input type password", "//input[@type='password']"),
+        ("input placeholder password", "//input[contains(translate(@placeholder,'PASSWORD','password'),'password')]"),
+        ("input name password", "//input[contains(@name, 'password')]"),
+        ("input id password", "//input[contains(@id, 'password')]"),
+    ]
+    for name, xpath in pw_strategies:
+        try:
+            el = page.locator(xpath).first
+            if el.is_visible(timeout=2000):
+                log.info(f"Found password field via: {name}")
+                el.fill(PASSWORD)
+                break
+        except Exception:
+            continue
+
+    submit_strategies = [
+        ("button type submit", "//button[@type='submit']"),
+        ("submit button text", "//button[contains(translate(text(),'LOGIN','login'),'login')]"),
+        ("submit input type", "//input[@type='submit']"),
+        ("any submit", "//*[@type='submit']"),
+    ]
+    for name, xpath in submit_strategies:
+        try:
+            el = page.locator(xpath).first
+            if el.is_visible(timeout=2000):
+                log.info(f"Found submit via: {name}")
+                el.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def playwright_update():
     global last_screenshot, last_status
     log.info("=" * 50)
@@ -152,52 +194,146 @@ def playwright_update():
             page = browser.new_page(viewport={"width": 1920, "height": 1080})
 
             log.info("Navigating to naukri.com...")
-            page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-
-            log.info("Clicking login button...")
-            btn = first_visible(page, SELECTORS["login_btn"])
-            btn.click()
-            time.sleep(2)
-
-            log.info("Entering email...")
-            inp = first_visible(page, SELECTORS["email"])
-            inp.fill(EMAIL)
-
-            log.info("Entering password...")
-            inp = first_visible(page, SELECTORS["password"])
-            inp.fill(PASSWORD)
-
-            log.info("Submitting login...")
-            page.locator("button[type='submit']").first.click(timeout=15000)
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
             time.sleep(5)
-            page.wait_for_load_state("networkidle", timeout=20000)
-            log.info("Login successful")
+
+            diagnostic_ss = str(SCREENSHOTS_DIR / "diagnostic.png")
+            page.screenshot(path=diagnostic_ss, full_page=False)
+            title = page.title()
+            log.info(f"Page title: {title}")
+            send_telegram(f"Naukri page loaded\nTitle: {title}\nURL: {page.url}", diagnostic_ss)
+
+            logged_in = False
+            profile_indicators = [
+                "a[href*='profile' i]",
+                "a[href*='myaccount' i]",
+                "[class*='userName' i]",
+                "[class*='profile' i]",
+                "[class*='avatar' i]",
+                "img[alt*='profile' i]",
+            ]
+            for sel in profile_indicators:
+                try:
+                    if page.locator(sel).first.is_visible(timeout=2000):
+                        logged_in = True
+                        log.info(f"Already logged in (found: {sel})")
+                        break
+                except Exception:
+                    continue
+
+            if not logged_in:
+                log.info("Clicking login button...")
+                clicked = try_click_login(page)
+                if not clicked:
+                    log.warning("Login button not found on homepage, trying direct pages...")
+                    login_urls = [
+                        "https://www.naukri.com/nlogin/login",
+                        "https://login.naukri.com",
+                        "https://www.naukri.com/login",
+                        "https://www.naukri.com/mnjuser/homepage",
+                    ]
+                    for url in login_urls:
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                            time.sleep(3)
+                            if try_fill_login_form(page):
+                                clicked = True
+                                log.info(f"Login form found on: {url}")
+                                break
+                        except Exception:
+                            continue
+
+                if not clicked:
+                    raise RuntimeError("Could not find login button or form")
+
+                time.sleep(2)
+                filled = try_fill_login_form(page)
+                if not filled:
+                    raise RuntimeError("Could not find email/password fields")
+
+                log.info("Waiting for login to complete...")
+                time.sleep(5)
+                try:
+                    page.wait_for_url(re.compile(r"(naukri\.com/?$|mnjuser|homepage)"), timeout=15000)
+                except Exception:
+                    pass
+                log.info(f"Post-login URL: {page.url}")
 
             log.info("Navigating to profile page...")
-            page.goto(f"{BASE_URL}/mnjuser/profile", wait_until="networkidle", timeout=30000)
-            time.sleep(3)
+            page.goto(f"{BASE_URL}/mnjuser/profile", wait_until="domcontentloaded", timeout=30000)
+            time.sleep(5)
 
-            log.info("Clicking edit button...")
-            btn = first_visible(page, SELECTORS["edit_btn"])
-            btn.click()
+            log.info("Looking for edit button...")
+            edit_strategies = [
+                ("img edit icon", "//img[contains(@src, 'edit') or contains(@class, 'edit')]"),
+                ("span edit icon", "//span[contains(@class, 'edit')]"),
+                ("i edit icon", "//i[contains(@class, 'edit')]"),
+                ("button edit", "//button[contains(text(), 'Edit')]"),
+                ("a edit", "//a[contains(text(), 'Edit')]"),
+                ("first img in profile section", "(//div[contains(@class, 'profile') or contains(@class, 'section')]//img)[1]"),
+            ]
+            edit_found = False
+            for name, xpath in edit_strategies:
+                try:
+                    el = page.locator(xpath).first
+                    if el.is_visible(timeout=3000):
+                        el.click()
+                        log.info(f"Clicked edit via: {name}")
+                        edit_found = True
+                        break
+                except Exception:
+                    continue
+            if not edit_found:
+                log.warning("Edit button not found, trying to scroll to bottom of profile")
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(1)
             time.sleep(2)
 
-            log.info("Toggling summary whitespace...")
-            summary = first_visible(page, SELECTORS["textarea"])
-            current = summary.input_value() or ""
-            if current.endswith(" "):
-                summary.fill(current.rstrip())
-                log.info("Removed trailing space")
-            else:
-                summary.fill(current + " ")
-                log.info("Added trailing space")
-            time.sleep(1)
+            log.info("Looking for textarea...")
+            ta_strategies = [
+                ("textarea", "//textarea"),
+                ("rich text editor", "//div[@contenteditable='true']"),
+                ("profile summary field", "//*[contains(@id, 'summary') or contains(@class, 'summary') or contains(@name, 'summary')]"),
+            ]
+            textarea = None
+            for name, xpath in ta_strategies:
+                try:
+                    el = page.locator(xpath).first
+                    if el.is_visible(timeout=3000):
+                        textarea = el
+                        log.info(f"Found text field via: {name}")
+                        break
+                except Exception:
+                    continue
 
-            log.info("Saving...")
-            btn = first_visible(page, SELECTORS["save_btn"])
-            btn.click()
+            if textarea:
+                current = textarea.input_value() or ""
+                if current.endswith(" "):
+                    textarea.fill(current.rstrip())
+                    log.info("Removed trailing space")
+                else:
+                    textarea.fill(current + " ")
+                    log.info("Added trailing space")
+                time.sleep(1)
+
+            log.info("Looking for save button...")
+            save_strategies = [
+                ("button Save text", "//button[contains(translate(text(),'SAVE','save'),'save')]"),
+                ("button type submit", "//button[@type='submit']"),
+                ("button save id", "//button[contains(@id, 'save')]"),
+                ("any save", "//*[contains(@type, 'submit')]"),
+            ]
+            for name, xpath in save_strategies:
+                try:
+                    el = page.locator(xpath).first
+                    if el.is_visible(timeout=3000):
+                        el.click()
+                        log.info(f"Clicked save via: {name}")
+                        break
+                except Exception:
+                    continue
+
             time.sleep(4)
-
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             ss_path = str(SCREENSHOTS_DIR / f"profile_{timestamp}.png")
             page.screenshot(path=ss_path, full_page=True)
@@ -231,7 +367,7 @@ def playwright_update():
             "screenshot": Path(debug_ss).name if debug_ss else None,
             "error": str(e),
         }
-        msg = f"<b>Naukri Update Failed</b>\nError: {str(e)[:200]}\nTime: {elapsed:.0f}s"
+        msg = f"<b>Naukri Update Failed</b>\nError: {str(e)[:300]}\nTime: {elapsed:.0f}s"
         log.error(f"Naukri update failed after {elapsed:.0f}s: {e}")
         send_telegram(msg, debug_ss)
 
