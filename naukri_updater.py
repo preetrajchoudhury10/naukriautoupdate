@@ -1,14 +1,17 @@
 import os
 import time
+import json
 import logging
 import sys
-import json
-import re
 import urllib.request
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 load_dotenv()
 
@@ -21,19 +24,28 @@ log = logging.getLogger(__name__)
 
 EMAIL = os.getenv("NAUKRI_EMAIL")
 PASSWORD = os.getenv("NAUKRI_PASSWORD")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 if not EMAIL or not PASSWORD:
     log.error("NAUKRI_EMAIL and NAUKRI_PASSWORD must be set in .env file")
     sys.exit(1)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
 BASE_DIR = Path(__file__).parent
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
-
 STATUS_FILE = BASE_DIR / "last_status.json"
-LOG_FILE = BASE_DIR / "last_log.txt"
+
+BASE_URL = "https://www.naukri.com"
+LOGIN_BTN_XPATH = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
+EMAIL_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input"
+PASSWORD_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input"
+PROFILE_URL = f"{BASE_URL}/mnjuser/profile"
+EDIT_BTN_XPATH = "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img"
+EDIT_TEXTAREA_XPATH = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea"
+SAVE_BTN_XPATH = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
+
+RETRIES = 3
 
 
 def send_telegram(message, screenshot_path=None):
@@ -77,233 +89,148 @@ def send_telegram(message, screenshot_path=None):
         log.warning(f"Telegram send failed: {e}")
 
 
-LOGIN_BTN = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
-EMAIL_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input"
-PASSWORD_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input"
-EDIT_BTN = "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img"
-EDIT_TEXTAREA = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea"
-SAVE_BTN = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
+def init_driver():
+    options = webdriver.ChromeOptions()
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    driver = webdriver.Chrome(options=options)
+    driver.execute_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    return driver
 
 
-def try_click_login(page):
-    strategies = [
-        ("exact login btn", LOGIN_BTN),
-        ("role link with Login", None),
-    ]
-    for name, xpath in strategies:
-        try:
-            if xpath:
-                el = page.locator(f"xpath={xpath}").first
-                el.wait_for(state="visible", timeout=5000)
-                el.click()
-                log.info(f"Found login via: {name}")
-                return True
-        except Exception:
-            continue
-    for fn_name, fn in [
-        ("role link", lambda: page.get_by_role("link", name=re.compile("login", re.IGNORECASE)).first),
-        ("role button", lambda: page.get_by_role("button", name=re.compile("login", re.IGNORECASE)).first),
-        ("text", lambda: page.get_by_text(re.compile("login", re.IGNORECASE)).first),
-        ("href", lambda: page.locator("a[href*='login' i], [href*='login' i]").first),
-        ("class/id", lambda: page.locator("[class*='login' i], [id*='login' i]").first),
-        ("sign in", lambda: page.get_by_text(re.compile("sign.in", re.IGNORECASE)).first),
-        ("header link", lambda: page.locator("header a, nav a").first),
-    ]:
-        try:
-            el = fn()
-            if el.is_visible(timeout=3000):
-                el.click()
-                log.info(f"Found login via: {fn_name}")
-                return True
-        except Exception:
-            continue
-    return False
+def login(driver):
+    log.info("Navigating to naukri.com...")
+    driver.get(BASE_URL)
+    time.sleep(3)
+
+    log.info("Clicking login button...")
+    login_btn = WebDriverWait(driver, 15).until(
+        EC.element_to_be_clickable((By.XPATH, LOGIN_BTN_XPATH))
+    )
+    login_btn.click()
+    time.sleep(2)
+
+    log.info("Entering email...")
+    email_input = WebDriverWait(driver, 15).until(
+        EC.element_to_be_clickable((By.XPATH, EMAIL_XPATH))
+    )
+    email_input.clear()
+    email_input.send_keys(EMAIL)
+
+    log.info("Entering password...")
+    password_input = driver.find_element(By.XPATH, PASSWORD_XPATH)
+    password_input.clear()
+    password_input.send_keys(PASSWORD)
+
+    login_btn = driver.find_element(By.XPATH, "//button[@type='submit']")
+    login_btn.click()
+    log.info("Login button clicked")
+
+    time.sleep(5)
+    WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]"))
+    )
+    log.info("Login successful")
+    return True
 
 
-def try_fill_login(page):
-    for name, xpath in [("exact email", EMAIL_XPATH), ("type email", "//input[@type='email']"), ("first text", "(//input[@type='text'])[1]")]:
-        try:
-            el = page.locator(f"xpath={xpath}").first
-            el.wait_for(state="visible", timeout=3000)
-            el.fill(EMAIL)
-            log.info(f"Email via: {name}")
-            break
-        except Exception:
-            continue
+def update_profile(driver):
+    log.info("Navigating to profile page...")
+    driver.get(PROFILE_URL)
+    time.sleep(5)
+
+    log.info("Clicking edit button...")
+    edit_btn = WebDriverWait(driver, 15).until(
+        EC.element_to_be_clickable((By.XPATH, EDIT_BTN_XPATH))
+    )
+    edit_btn.click()
+    time.sleep(2)
+
+    log.info("Waiting for edit modal textarea...")
+    summary = WebDriverWait(driver, 15).until(
+        EC.presence_of_element_located((By.XPATH, EDIT_TEXTAREA_XPATH))
+    )
+
+    current_text = summary.get_attribute("value") or ""
+    if current_text.endswith(" "):
+        summary.clear()
+        summary.send_keys(current_text.rstrip())
+        log.info("Removed trailing space from summary")
     else:
-        return False
+        summary.clear()
+        summary.send_keys(current_text + " ")
+        log.info("Added trailing space to summary")
 
-    for name, xpath in [("exact pw", PASSWORD_XPATH), ("type password", "//input[@type='password']")]:
-        try:
-            el = page.locator(f"xpath={xpath}").first
-            el.fill(PASSWORD)
-            log.info(f"Password via: {name}")
-            break
-        except Exception:
-            continue
+    time.sleep(1)
 
-    try:
-        page.locator("button[type='submit'], input[type='submit']").first.click(timeout=5000)
-        return True
-    except Exception:
-        return False
+    log.info("Clicking save button...")
+    save_btn = driver.find_element(By.XPATH, SAVE_BTN_XPATH)
+    save_btn.click()
+
+    time.sleep(4)
+    log.info("Profile update completed successfully")
+    return True
 
 
-def run_update():
+def run():
     log.info("=" * 50)
     log.info("Starting Naukri profile update...")
     start = time.time()
-    page = None
     ss_path = None
+    last_error = None
 
-    try:
-        with sync_playwright() as pw:
-            proxy_url = os.getenv("PROXY_URL")
-            launch_kwargs = {
-                "headless": True,
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process",
-                    "--no-zygote",
-                ],
-            }
-            if proxy_url:
-                launch_kwargs["proxy"] = {"server": proxy_url}
-            browser = pw.chromium.launch(**launch_kwargs)
-            page = browser.new_page(viewport={"width": 1920, "height": 1080})
-
-            log.info("Navigating to naukri.com...")
-            page.goto("https://www.naukri.com", wait_until="domcontentloaded", timeout=30000)
-            time.sleep(5)
-
-            logged_in = False
-            for sel in ["a[href*='profile' i]", "[class*='userName' i]", "[class*='avatar' i]"]:
-                try:
-                    if page.locator(sel).first.is_visible(timeout=2000):
-                        logged_in = True
-                        log.info(f"Already logged in (found: {sel})")
-                        break
-                except Exception:
-                    continue
-
-            if not logged_in:
-                clicked = try_click_login(page)
-                if not clicked:
-                    for url in [f"https://www.naukri.com/nlogin/login",
-                                "https://login.naukri.com",
-                                "https://www.naukri.com/login"]:
-                        try:
-                            page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                            time.sleep(3)
-                            if try_fill_login(page):
-                                clicked = True
-                                break
-                        except Exception:
-                            continue
-                if not clicked:
-                    raise RuntimeError("Could not find login button or form")
-
-                time.sleep(2)
-                if not try_fill_login(page):
-                    raise RuntimeError("Could not fill login form")
-
-                time.sleep(5)
-                log.info(f"Post-login URL: {page.url}")
-
-            log.info("Navigating to profile page...")
-            page.goto("https://www.naukri.com/mnjuser/profile", wait_until="domcontentloaded", timeout=30000)
-            time.sleep(5)
-
-            for name, xpath in [("exact edit", EDIT_BTN), ("img edit", "//img[contains(@src, 'edit')]"),
-                                ("span edit", "//span[contains(@class, 'edit')]"),
-                                ("button edit", "//button[contains(text(), 'Edit')]")]:
-                try:
-                    el = page.locator(f"xpath={xpath}").first
-                    el.wait_for(state="visible", timeout=3000)
-                    el.click()
-                    log.info(f"Clicked edit via: {name}")
-                    break
-                except Exception:
-                    continue
-            else:
-                log.warning("Edit button not found, continuing anyway")
-            time.sleep(2)
-
-            textarea = None
-            for name, xpath in [("exact textarea", EDIT_TEXTAREA), ("any textarea", "//textarea"),
-                                ("contenteditable", "//div[@contenteditable='true']")]:
-                try:
-                    el = page.locator(f"xpath={xpath}").first
-                    el.wait_for(state="visible", timeout=3000)
-                    textarea = el
-                    log.info(f"Found text field via: {name}")
-                    break
-                except Exception:
-                    continue
-
-            if textarea:
-                current = textarea.input_value() or ""
-                if current.endswith(" "):
-                    textarea.fill(current.rstrip())
-                    log.info("Removed trailing space")
-                else:
-                    textarea.fill(current + " ")
-                    log.info("Added trailing space")
-                time.sleep(1)
-
-            for name, xpath in [("exact save", SAVE_BTN), ("button save", "//button[contains(text(), 'Save')]"),
-                                ("submit", "//button[@type='submit']")]:
-                try:
-                    el = page.locator(f"xpath={xpath}").first
-                    el.wait_for(state="visible", timeout=3000)
-                    el.click()
-                    log.info(f"Clicked save via: {name}")
-                    break
-                except Exception:
-                    continue
-
-            time.sleep(4)
+    for attempt in range(1, RETRIES + 1):
+        log.info(f"Attempt {attempt}/{RETRIES}")
+        driver = None
+        try:
+            driver = init_driver()
+            login(driver)
+            update_profile(driver)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ss_path = str(SCREENSHOTS_DIR / f"profile_{ts}.png")
-            page.screenshot(path=ss_path, full_page=True)
-            browser.close()
+            driver.save_screenshot(ss_path)
+            status = {"success": True, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                      "screenshot": Path(ss_path).name, "error": None}
+            elapsed = time.time() - start
+            msg = f"<b>Naukri Profile Updated</b>\nTime: {elapsed:.0f}s\nDate: {status['time']}"
+            log.info(f"Naukri profile updated successfully ({elapsed:.0f}s)")
+            send_telegram(msg, ss_path)
+            STATUS_FILE.write_text(json.dumps(status, indent=2))
+            log.info("=" * 50)
+            return
+        except Exception as e:
+            last_error = str(e)
+            log.error(f"Attempt {attempt} failed: {e}")
+            if driver:
+                try:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ss_path = str(SCREENSHOTS_DIR / f"debug_{ts}.png")
+                    driver.save_screenshot(ss_path)
+                except Exception:
+                    pass
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            if attempt < RETRIES:
+                wait = attempt * 10
+                log.info(f"Retrying in {wait}s...")
+                time.sleep(wait)
 
-        status = {
-            "success": True,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "screenshot": Path(ss_path).name,
-            "error": None,
-        }
-        elapsed = time.time() - start
-        msg = f"<b>Naukri Profile Updated</b>\nTime: {elapsed:.0f}s\nDate: {status['time']}"
-        log.info(msg.replace("<b>", "").replace("</b>", ""))
-        send_telegram(msg, ss_path)
-
-    except Exception as e:
-        elapsed = time.time() - start
-        debug_ss = None
-        if page:
-            try:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                debug_ss = str(SCREENSHOTS_DIR / f"debug_{ts}.png")
-                page.screenshot(path=debug_ss, full_page=True)
-            except Exception:
-                pass
-        status = {
-            "success": False,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "screenshot": Path(debug_ss).name if debug_ss else None,
-            "error": str(e),
-        }
-        msg = f"<b>Naukri Update Failed</b>\nError: {str(e)[:300]}\nTime: {elapsed:.0f}s"
-        log.error(msg.replace("<b>", "").replace("</b>", ""))
-        send_telegram(msg, debug_ss)
-
+    elapsed = time.time() - start
+    status = {"success": False, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "screenshot": Path(ss_path).name if ss_path and Path(ss_path).exists() else None,
+              "error": last_error}
+    msg = f"<b>Naukri Update Failed</b>\nError: {last_error[:300]}\nTime: {elapsed:.0f}s"
+    log.error(msg.replace("<b>", "").replace("</b>", ""))
+    send_telegram(msg, ss_path if ss_path and Path(ss_path).exists() else None)
     STATUS_FILE.write_text(json.dumps(status, indent=2))
     log.info("=" * 50)
 
 
 if __name__ == "__main__":
-    run_update()
+    run()
