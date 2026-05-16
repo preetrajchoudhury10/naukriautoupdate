@@ -181,16 +181,21 @@ def playwright_update():
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=[
+            proxy_url = os.getenv("PROXY_URL")
+            launch_kwargs = {
+                "headless": True,
+                "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--single-process",
                     "--no-zygote",
                 ],
-            )
+            }
+            if proxy_url:
+                launch_kwargs["proxy"] = {"server": proxy_url}
+                log.info(f"Using proxy: {proxy_url}")
+            browser = pw.chromium.launch(**launch_kwargs)
             page = browser.new_page(viewport={"width": 1920, "height": 1080})
 
             log.info("Navigating to naukri.com...")
