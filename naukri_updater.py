@@ -52,15 +52,33 @@ def init_driver():
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--single-process")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--no-zygote")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-translate")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--mute-audio")
+    options.add_argument("--no-first-run")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    driver = webdriver.Chrome(options=options)
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    return driver
+    options.add_argument("--remote-debugging-port=0")
+    for _ in range(3):
+        try:
+            driver = webdriver.Chrome(options=options)
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            return driver
+        except Exception as e:
+            log.warning(f"Chrome init attempt failed: {e}")
+            time.sleep(2)
+    raise RuntimeError("Chrome failed to start after 3 attempts")
 
 
 LOGIN_BTN_XPATH = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
