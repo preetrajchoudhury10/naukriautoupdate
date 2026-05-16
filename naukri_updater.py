@@ -91,7 +91,7 @@ def send_telegram(message, screenshot_path=None):
 
 def init_driver():
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
+    options.add_argument("--window-position=-32000,-32000")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
