@@ -91,7 +91,8 @@ def send_telegram(message, screenshot_path=None):
 
 def init_driver():
     options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
+    options.add_argument("--headless=new")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -193,6 +194,8 @@ def run():
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ss_path = str(SCREENSHOTS_DIR / f"profile_{ts}.png")
             driver.save_screenshot(ss_path)
+            driver.quit()
+            driver = None
             status = {"success": True, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                       "screenshot": Path(ss_path).name, "error": None}
             elapsed = time.time() - start
