@@ -42,12 +42,48 @@ last_screenshot = None
 last_status = {"success": False, "time": None, "screenshot": None, "error": None}
 
 
-LOGIN_BTN = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
-EMAIL_INPUT = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input"
-PASSWORD_INPUT = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input"
-EDIT_BTN = "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img"
-EDIT_TEXTAREA = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea"
-SAVE_BTN = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
+SELECTORS = {
+    "login_btn": [
+        "//a[contains(text(), 'Login')]",
+        "//*[contains(text(), 'Login')]",
+        "//a[contains(@href, 'login')]",
+        "/html/body/div[1]/div[4]/div[2]/div/a[1]",
+    ],
+    "email": [
+        "//input[@type='text']",
+        "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input",
+    ],
+    "password": [
+        "//input[@type='password']",
+        "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input",
+    ],
+    "edit_btn": [
+        "//span[@class='editIcon']",
+        "//i[contains(@class, 'edit')]",
+        "//img[contains(@src, 'edit')]",
+        "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img",
+    ],
+    "textarea": [
+        "//textarea",
+        "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea",
+    ],
+    "save_btn": [
+        "//button[contains(text(), 'Save')]",
+        "//button[@type='submit']",
+        "/html/body/div[4]/div/div/div[2]/form/div[2]/button",
+    ],
+}
+
+
+def first_visible(page, selectors, timeout=10000):
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=timeout):
+                return loc
+        except Exception:
+            continue
+    raise TimeoutError(f"None of the selectors matched: {selectors}")
 
 
 def send_telegram(message, screenshot_path=None):
@@ -99,6 +135,7 @@ def playwright_update():
     log.info("Starting Naukri profile update...")
     start = time.time()
     ss_path = None
+    page = None
 
     try:
         with sync_playwright() as pw:
@@ -116,17 +153,19 @@ def playwright_update():
 
             log.info("Navigating to naukri.com...")
             page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-            time.sleep(2)
 
             log.info("Clicking login button...")
-            page.locator(f"xpath={LOGIN_BTN}").first.click(timeout=15000)
+            btn = first_visible(page, SELECTORS["login_btn"])
+            btn.click()
             time.sleep(2)
 
             log.info("Entering email...")
-            page.locator(f"xpath={EMAIL_INPUT}").first.fill(EMAIL, timeout=15000)
+            inp = first_visible(page, SELECTORS["email"])
+            inp.fill(EMAIL)
 
             log.info("Entering password...")
-            page.locator(f"xpath={PASSWORD_INPUT}").first.fill(PASSWORD, timeout=15000)
+            inp = first_visible(page, SELECTORS["password"])
+            inp.fill(PASSWORD)
 
             log.info("Submitting login...")
             page.locator("button[type='submit']").first.click(timeout=15000)
@@ -139,12 +178,12 @@ def playwright_update():
             time.sleep(3)
 
             log.info("Clicking edit button...")
-            page.locator(f"xpath={EDIT_BTN}").first.click(timeout=15000)
+            btn = first_visible(page, SELECTORS["edit_btn"])
+            btn.click()
             time.sleep(2)
 
             log.info("Toggling summary whitespace...")
-            summary = page.locator(f"xpath={EDIT_TEXTAREA}").first
-            summary.wait_for(state="visible", timeout=15000)
+            summary = first_visible(page, SELECTORS["textarea"])
             current = summary.input_value() or ""
             if current.endswith(" "):
                 summary.fill(current.rstrip())
@@ -155,7 +194,8 @@ def playwright_update():
             time.sleep(1)
 
             log.info("Saving...")
-            page.locator(f"xpath={SAVE_BTN}").first.click(timeout=15000)
+            btn = first_visible(page, SELECTORS["save_btn"])
+            btn.click()
             time.sleep(4)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -177,15 +217,23 @@ def playwright_update():
 
     except Exception as e:
         elapsed = time.time() - start
+        debug_ss = None
+        if page:
+            try:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                debug_ss = str(SCREENSHOTS_DIR / f"debug_{ts}.png")
+                page.screenshot(path=debug_ss, full_page=True)
+            except Exception:
+                pass
         last_status = {
             "success": False,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "screenshot": None,
+            "screenshot": Path(debug_ss).name if debug_ss else None,
             "error": str(e),
         }
         msg = f"<b>Naukri Update Failed</b>\nError: {str(e)[:200]}\nTime: {elapsed:.0f}s"
         log.error(f"Naukri update failed after {elapsed:.0f}s: {e}")
-        send_telegram(msg, ss_path if ss_path and os.path.exists(ss_path) else None)
+        send_telegram(msg, debug_ss)
 
     log.info("=" * 50)
 
