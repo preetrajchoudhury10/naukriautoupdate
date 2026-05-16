@@ -48,6 +48,8 @@ log.info(f"Total accounts loaded: {len(accounts)}")
 BASE_DIR = Path(__file__).parent
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
+PROFILES_DIR = BASE_DIR / "profiles"
+PROFILES_DIR.mkdir(exist_ok=True)
 STATUS_FILE = BASE_DIR / "last_status.json"
 
 BASE_URL = "https://www.naukri.com"
@@ -110,13 +112,17 @@ def send_telegram(message, screenshot_path=None):
             log.warning(f"Telegram attempt {attempt+1} failed: {e}")
 
 
-def init_driver():
+def init_driver(profile_path=None):
     options = webdriver.ChromeOptions()
     options.add_argument("--window-position=-32000,-32000")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    if profile_path:
+        profile_path = str(profile_path)
+        options.add_argument(f"--user-data-dir={profile_path}")
+        options.add_argument("--profile-directory=Default")
     driver = webdriver.Chrome(options=options)
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -198,18 +204,45 @@ def update_profile(driver):
     return True
 
 
+def try_profile_login(driver):
+    driver.get(PROFILE_URL)
+    time.sleep(4)
+    if "login" in driver.current_url.lower():
+        return False
+    try:
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]"))
+        )
+        return True
+    except Exception:
+        return False
+
+
 def run_account(email, password, acct_num, total):
     label = f"[{acct_num}/{total}] {email[:3]}...{email.split('@')[0][-1]}@{email.split('@')[1]}"
     log.info(f"{label} - Starting")
     start = time.time()
     ss_path = None
     last_error = None
+    profile_dir = PROFILES_DIR / f"account_{acct_num}"
 
     for attempt in range(1, RETRIES + 1):
         driver = None
         try:
-            driver = init_driver()
-            login(driver, email, password)
+            driver = init_driver(profile_dir)
+
+            if try_profile_login(driver):
+                log.info(f"{label} - Already logged in via saved profile")
+            else:
+                log.info(f"{label} - Profile expired or new, logging in...")
+                if attempt > 1:
+                    fresh_dir = PROFILES_DIR / f"account_{acct_num}_fresh"
+                    driver.quit()
+                    driver = init_driver(fresh_dir)
+                    driver.get(BASE_URL)
+                    time.sleep(3)
+                login(driver, email, password)
+
             update_profile(driver)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ss_path = str(SCREENSHOTS_DIR / f"acct{acct_num}_{ts}.png")
