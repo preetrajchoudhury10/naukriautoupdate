@@ -1,0 +1,10 @@
+[service]
+cronSchedule = "0 8,17 * * *"
+
+[deploy]
+healthcheckPath = "/health"
+restartPolicyType = "never"
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
