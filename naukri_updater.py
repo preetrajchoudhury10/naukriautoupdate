@@ -3,20 +3,15 @@ import time
 import logging
 import sys
 import io
+import json
 import threading
 import urllib.request
-import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import schedule
 from flask import Flask, send_file, render_template_string
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
@@ -44,227 +39,213 @@ BASE_URL = "https://www.naukri.com"
 SCREENSHOTS_DIR = Path(__file__).parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 last_screenshot = None
-last_status = {"success": False, "time": None, "screenshot": None}
+last_status = {"success": False, "time": None, "screenshot": None, "error": None}
 
 
-def init_driver():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--single-process")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--no-zygote")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-sync")
-    options.add_argument("--disable-translate")
-    options.add_argument("--disable-default-apps")
-    options.add_argument("--mute-audio")
-    options.add_argument("--no-first-run")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("--remote-debugging-port=0")
-    for _ in range(3):
-        try:
-            driver = webdriver.Chrome(options=options)
-            driver.execute_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            return driver
-        except Exception as e:
-            log.warning(f"Chrome init attempt failed: {e}")
-            time.sleep(2)
-    raise RuntimeError("Chrome failed to start after 3 attempts")
+LOGIN_BTN = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
+EMAIL_INPUT = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input"
+PASSWORD_INPUT = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input"
+EDIT_BTN = "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img"
+EDIT_TEXTAREA = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea"
+SAVE_BTN = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
 
 
-LOGIN_BTN_XPATH = "/html/body/div[1]/div[4]/div[2]/div/a[1]"
-EMAIL_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[2]/input"
-PASSWORD_XPATH = "/html/body/div[1]/div[4]/div[2]/div/div/div[2]/div/form/div[3]/input"
-
-
-def login(driver):
-    log.info("Navigating to naukri.com...")
-    driver.get(BASE_URL)
-    time.sleep(3)
-
-    log.info("Clicking login button...")
-    login_btn = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, LOGIN_BTN_XPATH))
-    )
-    login_btn.click()
-    time.sleep(2)
-
-    log.info("Entering email...")
-    email_input = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, EMAIL_XPATH))
-    )
-    email_input.clear()
-    email_input.send_keys(EMAIL)
-
-    log.info("Entering password...")
-    password_input = driver.find_element(By.XPATH, PASSWORD_XPATH)
-    password_input.clear()
-    password_input.send_keys(PASSWORD)
-
-    login_btn = driver.find_element(By.XPATH, "//button[@type='submit']")
-    login_btn.click()
-    log.info("Login button clicked")
-
-    time.sleep(5)
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'profile')]"))
-    )
-    log.info("Login successful")
-    return True
-
-
-PROFILE_URL = f"{BASE_URL}/mnjuser/profile"
-EDIT_BTN_XPATH = "/html/body/div[1]/div[1]/div[4]/div/div/div/div[3]/div[2]/div[7]/div/div[1]/div/div/h1/span/img"
-EDIT_TEXTAREA_XPATH = "/html/body/div[4]/div/div/div[2]/form/div[1]/div/div/textarea"
-SAVE_BTN_XPATH = "/html/body/div[4]/div/div/div[2]/form/div[2]/button"
-
-
-def update_profile(driver):
-    log.info("Navigating to profile page...")
-    driver.get(PROFILE_URL)
-    time.sleep(5)
-
-    log.info("Clicking edit button...")
-    edit_btn = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, EDIT_BTN_XPATH))
-    )
-    edit_btn.click()
-    time.sleep(2)
-
-    log.info("Waiting for edit modal textarea...")
-    summary = WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.XPATH, EDIT_TEXTAREA_XPATH))
-    )
-
-    current_text = summary.get_attribute("value") or ""
-    if current_text.endswith(" "):
-        summary.clear()
-        summary.send_keys(current_text.rstrip())
-        log.info("Removed trailing space from summary")
-    else:
-        summary.clear()
-        summary.send_keys(current_text + " ")
-        log.info("Added trailing space to summary")
-
-    time.sleep(1)
-
-    log.info("Clicking save button...")
-    save_btn = driver.find_element(By.XPATH, SAVE_BTN_XPATH)
-    save_btn.click()
-
-    time.sleep(4)
-    log.info("Profile update completed successfully")
-    return True
-
-
-def send_telegram(message):
+def send_telegram(message, screenshot_path=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        data = urllib.parse.urlencode({
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-        }).encode()
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        urllib.request.urlopen(url, data=data, timeout=10)
+        if screenshot_path and os.path.exists(screenshot_path):
+            import http.client
+            import mimetypes
+            boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+            filename = os.path.basename(screenshot_path)
+            with open(screenshot_path, "rb") as f:
+                file_bytes = f.read()
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                f"{TELEGRAM_CHAT_ID}\r\n"
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+                f"{message}\r\n"
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="photo"; filename="{filename}"\r\n'
+                f"Content-Type: image/png\r\n\r\n"
+            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            )
+        else:
+            data = json.dumps({
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+            }).encode()
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+        urllib.request.urlopen(req, timeout=15)
     except Exception as e:
         log.warning(f"Telegram send failed: {e}")
 
 
-def run_update():
+def playwright_update():
     global last_screenshot, last_status
     log.info("=" * 50)
-    log.info("Starting scheduled Naukri profile update...")
+    log.info("Starting Naukri profile update...")
     start = time.time()
-    driver = init_driver()
+    ss_path = None
+
     try:
-        login(driver)
-        update_profile(driver)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        ss_path = SCREENSHOTS_DIR / f"profile_{timestamp}.png"
-        driver.save_screenshot(str(ss_path))
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                    "--no-zygote",
+                ],
+            )
+            page = browser.new_page(viewport={"width": 1920, "height": 1080})
+
+            log.info("Navigating to naukri.com...")
+            page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
+            time.sleep(2)
+
+            log.info("Clicking login button...")
+            page.locator(f"xpath={LOGIN_BTN}").first.click(timeout=15000)
+            time.sleep(2)
+
+            log.info("Entering email...")
+            page.locator(f"xpath={EMAIL_INPUT}").first.fill(EMAIL, timeout=15000)
+
+            log.info("Entering password...")
+            page.locator(f"xpath={PASSWORD_INPUT}").first.fill(PASSWORD, timeout=15000)
+
+            log.info("Submitting login...")
+            page.locator("button[type='submit']").first.click(timeout=15000)
+            time.sleep(5)
+            page.wait_for_load_state("networkidle", timeout=20000)
+            log.info("Login successful")
+
+            log.info("Navigating to profile page...")
+            page.goto(f"{BASE_URL}/mnjuser/profile", wait_until="networkidle", timeout=30000)
+            time.sleep(3)
+
+            log.info("Clicking edit button...")
+            page.locator(f"xpath={EDIT_BTN}").first.click(timeout=15000)
+            time.sleep(2)
+
+            log.info("Toggling summary whitespace...")
+            summary = page.locator(f"xpath={EDIT_TEXTAREA}").first
+            summary.wait_for(state="visible", timeout=15000)
+            current = summary.input_value() or ""
+            if current.endswith(" "):
+                summary.fill(current.rstrip())
+                log.info("Removed trailing space")
+            else:
+                summary.fill(current + " ")
+                log.info("Added trailing space")
+            time.sleep(1)
+
+            log.info("Saving...")
+            page.locator(f"xpath={SAVE_BTN}").first.click(timeout=15000)
+            time.sleep(4)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ss_path = str(SCREENSHOTS_DIR / f"profile_{timestamp}.png")
+            page.screenshot(path=ss_path, full_page=True)
+            browser.close()
+
         last_screenshot = ss_path
         last_status = {
             "success": True,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "screenshot": ss_path.name,
+            "screenshot": Path(ss_path).name,
+            "error": None,
         }
         elapsed = time.time() - start
-        msg = f"Naukri profile updated successfully ({elapsed:.0f}s)"
-        log.info(msg)
-        send_telegram(msg)
+        msg = f"<b>Naukri Profile Updated</b>\nTime: {elapsed:.0f}s\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        log.info(f"Naukri profile updated successfully ({elapsed:.0f}s)")
+        send_telegram(msg, ss_path)
+
     except Exception as e:
         elapsed = time.time() - start
-        msg = f"Naukri update failed after {elapsed:.0f}s: {e}"
-        log.error(msg)
-        send_telegram(msg)
-    finally:
-        driver.quit()
-        log.info("=" * 50)
+        last_status = {
+            "success": False,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "screenshot": None,
+            "error": str(e),
+        }
+        msg = f"<b>Naukri Update Failed</b>\nError: {str(e)[:200]}\nTime: {elapsed:.0f}s"
+        log.error(f"Naukri update failed after {elapsed:.0f}s: {e}")
+        send_telegram(msg, ss_path if ss_path and os.path.exists(ss_path) else None)
+
+    log.info("=" * 50)
 
 
 LAST_HTML = """<!DOCTYPE html>
-<html>
-<head><title>Naukri Auto Update Status</title>
+<html><head><title>Naukri Auto Update</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body { font-family: Arial; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
-.card { background: #fff; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-.status { font-size: 18px; font-weight: bold; }
-.success { color: #28a745; }
-.fail { color: #dc3545; }
-img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
-a { color: #007bff; }
-</style></head>
-<body>
+body{font-family:Arial;max-width:800px;margin:40px auto;padding:0 20px;background:#f5f5f5}
+.card{background:#fff;border-radius:8px;padding:20px;margin:20px 0;box-shadow:0 2px 4px rgba(0,0,0,0.1)}
+.success{color:#28a745;font-weight:bold;font-size:18px}
+.fail{color:#dc3545;font-weight:bold;font-size:18px}
+img{max-width:100%;border:1px solid #ddd;border-radius:4px}
+pre{background:#1e1e1e;color:#d4d4d4;padding:15px;border-radius:4px;overflow-x:auto;font-size:13px}
+.error{color:#dc3545}
+a{color:#007bff}
+</style></head><body>
 <h1>Naukri Auto Update</h1>
 <div class="card">
-  <p class="status {{'success' if last_status.success else 'fail'}}">
-    {{'SUCCESS' if last_status.success else 'NO UPDATE YET'}}
+  <p class="{{'success' if last_status.success else 'fail'}}">
+    {{'SUCCESS' if last_status.success else ('FAILED' if last_status.time else 'NO UPDATE YET')}}
   </p>
   <p><strong>Last run:</strong> {{last_status.time or 'Never'}}</p>
+  {% if last_status.error %}<p class="error"><strong>Error:</strong> {{last_status.error}}</p>{% endif %}
 </div>
 {% if last_status.screenshot %}
 <div class="card">
   <h3>Last Screenshot</h3>
   <p><em>{{last_status.time}}</em></p>
-  <img src="/screenshot/{{last_status.screenshot}}" alt="Last profile screenshot">
+  <img src="/screenshot/{{last_status.screenshot}}" alt="Screenshot">
 </div>
 {% endif %}
 <div class="card">
   <a href="/start">Run Update Now</a> &nbsp;|&nbsp; <a href="/log">View Full Log</a>
-</div>
-</body></html>"""
+</div></body></html>"""
 
 app = Flask(__name__)
+
 
 @app.route("/")
 def index():
     return render_template_string(LAST_HTML, last_status=last_status)
 
+
 @app.route("/laststatus")
 def laststatus():
     return render_template_string(LAST_HTML, last_status=last_status)
 
-@app.route("/log")
-def get_log():
-    log_content = log_buffer.getvalue()
-    return f"<pre style='font-size:13px;'>{log_content}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
 
 @app.route("/start")
 def start_now():
-    t = threading.Thread(target=run_update, daemon=True)
-    t.start()
+    threading.Thread(target=playwright_update, daemon=True).start()
     return "<p>Update started. Check <a href='/log'>/log</a> for progress.</p>"
+
+
+@app.route("/log")
+def get_log():
+    content = log_buffer.getvalue()
+    return f"<pre>{content}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
+
 
 @app.route("/screenshot/<name>")
 def screenshot(name):
@@ -275,8 +256,8 @@ def screenshot(name):
 
 
 def start_scheduler():
-    schedule.every().day.at("08:00").do(run_update)
-    schedule.every().day.at("17:00").do(run_update)
+    schedule.every().day.at("08:00").do(playwright_update)
+    schedule.every().day.at("17:00").do(playwright_update)
     log.info("Scheduler set: 08:00 and 17:00 daily")
     while True:
         schedule.run_pending()
@@ -285,7 +266,7 @@ def start_scheduler():
 
 if __name__ == "__main__":
     log.info("Starting Naukri updater web service...")
-    run_update()
+    playwright_update()
     t = threading.Thread(target=start_scheduler, daemon=True)
     t.start()
     app.run(host="0.0.0.0", port=PORT)
