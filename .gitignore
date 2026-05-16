@@ -1,2 +1,4 @@
 .env
 *.log
+last_status.json
+screenshots/
