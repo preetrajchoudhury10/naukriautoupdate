@@ -353,6 +353,7 @@ if __name__ == "__main__":
     log.info("Telegram: /manualrun, /status, /help")
 
     threading.Thread(target=run_update, daemon=True).start()
+
     def scheduler_loop():
         schedule.every().day.at("08:00").do(lambda: threading.Thread(target=run_update, daemon=True).start())
         schedule.every().day.at("17:00").do(lambda: threading.Thread(target=run_update, daemon=True).start())
@@ -360,6 +361,20 @@ if __name__ == "__main__":
             schedule.run_pending()
             time.sleep(60)
     threading.Thread(target=scheduler_loop, daemon=True).start()
+
     threading.Thread(target=telegram_bot_loop, daemon=True).start()
 
-    app.run(host="127.0.0.1", port=PORT)
+    def flask_runner():
+        for port in [PORT, 8081, 8082, 8083]:
+            try:
+                app.run(host="127.0.0.1", port=port, debug=False)
+                break
+            except OSError:
+                continue
+    threading.Thread(target=flask_runner, daemon=True).start()
+
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        log.info("Shutting down...")
